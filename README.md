@@ -1,623 +1,344 @@
-# Secure JavaScript Execution with Sandboxed iframe + postMessage
+# 🚀 Collaborative Code Editor
 
-A production-ready code editor with **secure** JavaScript execution using sandboxed iframes and postMessage communication.
+A real-time collaborative code editor built with React, Monaco Editor, and WebSockets. Multiple users can edit code simultaneously in shared rooms with live synchronization.
 
-## 🔒 Security Architecture
+## ✨ Features
 
-### Problem: Cross-Origin Restrictions
+### 🔥 Core Features
+- **Real-time Collaboration** - Multiple users can edit simultaneously
+- **User Presence** - View all active users with avatars and colors
+- **Multi-Language Support** - JavaScript, Python, Java, C++
+- **Code Execution** - Run JavaScript locally, Python/Java/C++ via Piston API
+- **Room-Based Sessions** - Share URLs to collaborate instantly
 
-**Why direct `iframe.contentWindow.console` access fails:**
+### 🎨 UI/UX
+- **Glassmorphism Design** - Modern, minimal, professional aesthetic
+- **Dark/Light Theme** - Toggle between themes with smooth transitions
+- **Responsive Layout** - Works on desktop, tablet, and mobile
+- **Monaco Editor** - Same editor that powers VS Code
+
+### 🔐 Security
+- **Sandboxed Execution** - JavaScript runs in isolated iframes
+- **No Backend Data Storage** - In-memory room management
+- **WebSocket Communication** - Encrypted real-time sync
+
+## 🏗️ Architecture
+
+### Backend (WebSocket Server)
+
+**File:** `server.js`
 
 ```javascript
-// ❌ This FAILS with sandboxed iframe
-const iframe = document.createElement('iframe');
-iframe.sandbox = 'allow-scripts'; // No allow-same-origin!
-document.body.appendChild(iframe);
-
-iframe.contentWindow.console.log = function() { 
-  // SecurityError: Blocked a frame with origin "null" from accessing 
-  // a cross-origin frame.
+// In-memory storage
+const rooms = Map {
+'room-abc123': {
+code: 'console.log("hello");',
+clients: Set<WebSocket>
+}
 }
 ```
 
-**Root cause:**
-- Without `allow-same-origin`, the iframe runs in a **null origin**
-- Browsers enforce Same-Origin Policy (SOP) strictly
-- Direct JavaScript object access across origins is **forbidden**
-- This is a security feature, not a bug!
+**Key Functions:**
 
-**Why it matters:**
-- Prevents malicious code from accessing parent window
-- Isolates untrusted user code
-- Protects against XSS and code injection attacks
+1. **handleJoin** - Client joins room
+- Create room if doesn't exist
+- Add client to room's Set
+- Send current code to new client
+- Broadcast user count to others
 
----
+2. **handleCodeChange** - Client edits code
+- Update room's code (last-write-wins)
+- Broadcast to ALL clients EXCEPT sender
 
-### Solution: postMessage API
+3. **handleLeave** - Client disconnects
+- Remove from room's Set
+- Delete room if empty
+- Notify remaining clients
 
-**Why postMessage is the correct (and only) solution:**
-
-1. **Designed for cross-origin communication** - Works even with `sandbox="allow-scripts"`
-2. **Asynchronous message passing** - Safe, non-blocking communication
-3. **Structured data transfer** - Send JSON objects between contexts
-4. **Browser security built-in** - No way to bypass SOP
-
-**Communication Flow:**
-
-```
-┌─────────────────────────┐
-│   Parent (React App)    │
-│                         │
-│  window.addEventListener│
-│    ('message', ...)     │ ◄────┐
-└─────────────────────────┘      │
-                                 │ postMessage
-                                 │
-┌─────────────────────────┐      │
-│  Sandboxed iframe       │      │
-│  sandbox="allow-scripts"│      │
-│                         │      │
-│  console.log overridden │──────┘
-│  window.parent.postMessage()
-│                         │
-│  User code executes     │
-└─────────────────────────┘
-```
-
----
-
-## 🏗️ Implementation Details
-
-### 1. iframe srcDoc Template
-
-The heart of the execution engine:
-
+**Broadcast Strategy:**
 ```javascript
-const generateIframeSrcDoc = (userCode) => {
-  return `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body>
-  <script>
-    // CRITICAL: Override console BEFORE user code runs
-    (function() {
-      const originalLog = console.log;
-      
-      // Override console.log
-      console.log = function(...args) {
-        // Send to parent via postMessage
-        window.parent.postMessage({
-          type: 'console.log',
-          data: args.map(arg => 
-            typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-          )
-        }, '*');
-        
-        // Keep original behavior (for iframe's own console)
-        originalLog.apply(console, args);
-      };
-      
-      // Catch runtime errors
-      window.onerror = function(message, source, lineno, colno, error) {
-        window.parent.postMessage({
-          type: 'runtime.error',
-          data: [error ? error.toString() : message]
-        }, '*');
-        return false;
-      };
-      
-      // Catch unhandled promise rejections
-      window.addEventListener('unhandledrejection', function(event) {
-        window.parent.postMessage({
-          type: 'runtime.error',
-          data: ['Unhandled Promise Rejection: ' + event.reason]
-        }, '*');
-      });
-    })();
-  </script>
-  
-  <script>
-    // User code executes here
-    try {
-      ${userCode}
-    } catch (error) {
-      console.error('Execution Error: ' + error.message);
-    }
-  </script>
-</body>
-</html>
-  `.trim();
-};
+broadcast(roomId, message, excludeClient) {
+room.clients.forEach(client => {
+if (client !== excludeClient) { // Don't echo back to sender
+client.send(message)
+}
+})
+}
 ```
-
-**Key techniques:**
-
-1. **IIFE (Immediately Invoked Function Expression)**: Runs before user code to set up overrides
-2. **Function preservation**: Keeps original `console.log` with `originalLog.apply()`
-3. **Serialization**: Converts objects to JSON for cross-origin transfer
-4. **Error catching**: Three layers - `try/catch`, `window.onerror`, `unhandledrejection`
-5. **Dual logging**: Sends to parent AND keeps iframe console working
 
 ---
 
-### 2. Parent Window Setup (React)
+### Frontend (React + Monaco)
 
+**WebSocket Connection:**
 ```javascript
-// Setup message listener on component mount
 useEffect(() => {
-  const handleMessage = (event) => {
-    // In production: validate event.origin for extra security
-    // if (event.origin !== 'expected-origin') return;
-    
-    const { type, data } = event.data;
-    
-    if (type === 'console.log') {
-      setOutput(prev => [...prev, {
-        type: 'log',
-        content: data.join(' ')
-      }]);
-    } else if (type === 'runtime.error') {
-      setOutput(prev => [...prev, {
-        type: 'error',
-        content: '❌ Runtime Error: ' + data.join(' ')
-      }]);
-    }
-  };
-  
-  window.addEventListener('message', handleMessage);
-  
-  // Cleanup on unmount
-  return () => {
-    window.removeEventListener('message', handleMessage);
-  };
+const ws = new WebSocket('ws://localhost:8080');
+
+ws.onopen = () => {
+ws.send({ type: 'join', roomId: 'room-xyz' });
+};
+
+ws.onmessage = (event) => {
+const { type, code } = JSON.parse(event.data);
+
+if (type === 'code-update') {
+isRemoteChange.current = true; // CRITICAL: Prevent loop
+setCode(code);
+}
+};
 }, []);
 ```
 
-**Important points:**
-- Listener persists across code executions
-- State updates trigger re-renders automatically
-- Cleanup prevents memory leaks
-
----
-
-### 3. Code Execution
-
+**Editor Change Handler:**
 ```javascript
-const runCode = () => {
-  setOutput([]); // Clear previous output
-  
-  // Generate iframe HTML with user code embedded
-  const iframeSrcDoc = generateIframeSrcDoc(code);
-  
-  // Update iframe (this triggers execution)
-  if (iframeRef.current) {
-    iframeRef.current.srcdoc = iframeSrcDoc;
-  }
-};
-```
+const handleEditorChange = (value) => {
+setCode(value);
 
-**Execution sequence:**
-1. Clear output array
-2. Generate new HTML with embedded user code
-3. Set iframe's `srcdoc` → Browser parses HTML → Scripts execute
-4. Console overrides capture output → postMessage sends to parent
-5. Parent receives messages → Updates state → UI re-renders
-
----
-
-### 4. Sandbox Security
-
-```jsx
-<iframe
-  ref={iframeRef}
-  sandbox="allow-scripts"  // ONLY allow JavaScript
-  style={{ display: 'none' }}
-  title="code-executor"
-/>
-```
-
-**What `sandbox="allow-scripts"` prevents:**
-
-| Feature | Status | Why Blocked |
-|---------|--------|-------------|
-| Network requests (fetch, XMLHttpRequest) | ❌ Blocked | Prevent data exfiltration |
-| Popups (window.open) | ❌ Blocked | Prevent annoying popups |
-| Forms (submit) | ❌ Blocked | Prevent CSRF attacks |
-| Same-origin access | ❌ Blocked | Isolate from parent |
-| Top navigation | ❌ Blocked | Can't redirect parent page |
-| Cookies/localStorage | ❌ Blocked | No persistent storage |
-| JavaScript | ✅ Allowed | Need to run code |
-
-**This is extremely secure.** Even if user writes malicious code, they can't:
-- Steal data from your site
-- Make API calls
-- Access cookies or localStorage
-- Redirect the page
-- Open popups
-- Access the parent window directly
-
----
-
-## 📊 Message Protocol
-
-### Message Types
-
-```typescript
-// Sent from iframe to parent
-type Message = 
-  | { type: 'console.log', data: string[] }
-  | { type: 'console.error', data: string[] }
-  | { type: 'console.warn', data: string[] }
-  | { type: 'runtime.error', data: string[] }
-```
-
-### Example Messages
-
-```javascript
-// Normal log
-window.parent.postMessage({
-  type: 'console.log',
-  data: ['Hello, World!']
-}, '*');
-
-// Object log
-window.parent.postMessage({
-  type: 'console.log',
-  data: ['{"name":"Alice","age":30}']
-}, '*');
-
-// Runtime error
-window.parent.postMessage({
-  type: 'runtime.error',
-  data: ['ReferenceError: x is not defined']
-}, '*');
-```
-
----
-
-## 🚀 How to Run
-
-```bash
-cd code-editor-step1
-npm install
-npm run dev
-```
-
-Visit `http://localhost:5173` and:
-1. Select "JavaScript" language
-2. Write code with `console.log()`
-3. Click "Run Code"
-4. See output in console panel
-
----
-
-## 🧪 Test Cases
-
-Try these in the editor:
-
-### Basic Logging
-```javascript
-console.log("Hello, World!");
-console.log(42);
-console.log(true);
-```
-
-### Object Logging
-```javascript
-const user = { name: "Alice", age: 30 };
-console.log(user);
-console.log([1, 2, 3, 4, 5]);
-```
-
-### Error Handling
-```javascript
-console.log("Before error");
-throw new Error("Something went wrong!");
-console.log("After error"); // This won't run
-```
-
-### Async Code
-```javascript
-console.log("Start");
-
-setTimeout(() => {
-  console.log("After 1 second");
-}, 1000);
-
-console.log("End");
-```
-
----
-
-## 🔄 Extending with Backend for Multi-Language Support
-
-### Current Architecture (Browser-Only)
-
-```
-┌──────────────┐
-│ React App    │
-│              │
-│ ┌──────────┐ │
-│ │ Monaco   │ │  JavaScript only
-│ │ Editor   │ │  Sandboxed iframe
-│ └──────────┘ │  postMessage
-│              │
-│ ┌──────────┐ │
-│ │ iframe   │ │
-│ │ (JS)     │ │
-│ └──────────┘ │
-└──────────────┘
-```
-
-### Future Architecture (Backend Integration)
-
-```
-┌──────────────┐      HTTP POST        ┌──────────────┐
-│ React App    │─────────────────────→ │ Backend API  │
-│              │                        │ (Express.js) │
-│ ┌──────────┐ │                        │              │
-│ │ Monaco   │ │   { code, language }  │ ┌──────────┐ │
-│ │ Editor   │ │ ←─────────────────────│ │ Docker   │ │
-│ └──────────┘ │                        │ │ Runtime  │ │
-│              │   { output, error }   │ └──────────┘ │
-└──────────────┘                        └──────────────┘
-                                              │
-                                              ├─ Python
-                                              ├─ Java
-                                              ├─ C++
-                                              └─ Go
-```
-
----
-
-### Implementation Steps
-
-#### 1. Backend Setup (Express.js + Docker)
-
-```javascript
-// server.js
-const express = require('express');
-const { exec } = require('child_process');
-const Docker = require('dockerode');
-
-const app = express();
-const docker = new Docker();
-
-app.use(express.json());
-
-app.post('/execute', async (req, res) => {
-  const { code, language } = req.body;
-  
-  // Language to Docker image mapping
-  const images = {
-    python: 'python:3.11-alpine',
-    java: 'openjdk:17-alpine',
-    cpp: 'gcc:latest'
-  };
-  
-  try {
-    // Create and run container
-    const container = await docker.createContainer({
-      Image: images[language],
-      Cmd: getCommandForLanguage(language, code),
-      HostConfig: {
-        Memory: 100 * 1024 * 1024, // 100MB limit
-        NanoCpus: 1000000000, // 1 CPU
-        NetworkMode: 'none' // No network access
-      },
-      AttachStdout: true,
-      AttachStderr: true
-    });
-    
-    await container.start();
-    
-    // Set timeout
-    const timeout = setTimeout(async () => {
-      await container.kill();
-    }, 5000); // 5 second limit
-    
-    // Wait for completion
-    const output = await container.wait();
-    clearTimeout(timeout);
-    
-    // Get logs
-    const logs = await container.logs({
-      stdout: true,
-      stderr: true
-    });
-    
-    // Cleanup
-    await container.remove();
-    
-    res.json({ 
-      output: logs.toString(),
-      exitCode: output.StatusCode
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-function getCommandForLanguage(language, code) {
-  switch(language) {
-    case 'python':
-      return ['python', '-c', code];
-    case 'java':
-      // More complex: save to file, compile, run
-      return ['sh', '-c', `echo "${code}" > Main.java && javac Main.java && java Main`];
-    case 'cpp':
-      return ['sh', '-c', `echo "${code}" > main.cpp && g++ main.cpp -o main && ./main`];
-    default:
-      throw new Error('Unsupported language');
-  }
+// Don't send if this was a remote change
+if (isRemoteChange.current) {
+isRemoteChange.current = false;
+return;
 }
 
-app.listen(3001, () => {
-  console.log('Code execution server running on port 3001');
-});
-```
-
-#### 2. Frontend Update
-
-```javascript
-const runCode = async () => {
-  if (language === 'javascript') {
-    // Use existing iframe approach
-    executeInIframe(code);
-  } else {
-    // Use backend for other languages
-    setIsRunning(true);
-    setOutput([]);
-    
-    try {
-      const response = await fetch('http://localhost:3001/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, language })
-      });
-      
-      const result = await response.json();
-      
-      if (result.error) {
-        setOutput([{ type: 'error', content: result.error }]);
-      } else {
-        setOutput([{ type: 'log', content: result.output }]);
-      }
-    } catch (error) {
-      setOutput([{ type: 'error', content: 'Backend error: ' + error.message }]);
-    } finally {
-      setIsRunning(false);
-    }
-  }
+// Send to server
+ws.send({ type: 'code-change', code: value });
 };
 ```
 
-#### 3. Security Considerations
-
-**Critical backend security measures:**
-
-1. **Rate Limiting**
-```javascript
-const rateLimit = require('express-rate-limit');
-
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
-});
-
-app.use('/execute', limiter);
-```
-
-2. **Input Validation**
-```javascript
-const MAX_CODE_LENGTH = 10000;
-
-app.post('/execute', (req, res) => {
-  if (!req.body.code || req.body.code.length > MAX_CODE_LENGTH) {
-    return res.status(400).json({ error: 'Invalid code' });
-  }
-  
-  const allowedLanguages = ['python', 'java', 'cpp'];
-  if (!allowedLanguages.includes(req.body.language)) {
-    return res.status(400).json({ error: 'Unsupported language' });
-  }
-  
-  // Proceed with execution...
-});
-```
-
-3. **Resource Limits (Docker)**
-- Memory: 100MB max
-- CPU: 1 core max
-- Execution time: 5 seconds max
-- Network: None
-- Disk I/O: Minimal
-
-4. **Code Sandboxing**
-- Each execution in isolated container
-- Container destroyed after execution
-- No persistent file system
-- No access to host system
-
 ---
 
-### Alternative: Use Existing Services
+## 🛠️ Tech Stack
 
-Instead of building your own backend, use:
+**Frontend:**
+- React 18.2
+- Monaco Editor (VS Code editor)
+- WebSockets (native)
 
-**Judge0 CE (Open Source)**
-```javascript
-const response = await fetch('https://judge0-ce.p.rapidapi.com/submissions', {
-  method: 'POST',
-  headers: {
-    'content-type': 'application/json',
-    'X-RapidAPI-Key': 'YOUR_API_KEY'
-  },
-  body: JSON.stringify({
-    source_code: code,
-    language_id: 71, // Python
-    stdin: ''
-  })
-});
+**Backend:**
+- Node.js
+- ws (WebSocket library)
+
+**External APIs:**
+- Piston API (for Python/Java/C++ execution)
+
+## 📁 Project Structure
 ```
-
-**Piston API**
-```javascript
-const response = await fetch('https://emkc.org/api/v2/piston/execute', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    language: 'python',
-    version: '3.10',
-    files: [{ content: code }]
-  })
-});
-```
-
----
-
-## 🎯 Summary
-
-### What You Built
-
-1. **Secure execution engine** using sandboxed iframe
-2. **Cross-origin communication** with postMessage
-3. **Console hijacking** to capture logs
-4. **Error handling** for runtime errors
-5. **Production-ready architecture** that's scalable
-
-### Key Learnings
-
-1. **Same-Origin Policy** prevents direct iframe access
-2. **postMessage** is the standard cross-origin communication method
-3. **Sandboxing** provides strong security guarantees
-4. **srcDoc** allows dynamic iframe content generation
-5. **Browser limitations** require backend for non-JS languages
-
-### Extension Path
-
-- **Next step:** Add backend API
-- **After that:** Docker containerization
-- **Then:** Multi-language support
-- **Finally:** Collaborative editing with WebSockets
-
----
-
-## 📁 File Structure
-
-```
-code-editor-step1/
+collaborative-code-editor/
 ├── src/
-│   ├── App.jsx          # ✅ Secure execution with postMessage
-│   ├── App.css          # ✅ Enhanced console styling
-│   ├── main.jsx         # React entry
-│   └── index.css        # Global styles
-├── index.html
-├── package.json
-├── vite.config.js
-└── README.md            # This file
+│ ├── App.jsx # Main React component
+│ ├── App.css # Styles (glassmorphism design)
+│ ├── main.jsx # React entry point
+│ └── index.css # Global styles
+├── server.js # WebSocket server
+├── package.json # Dependencies
+├── vite.config.js # Vite configuration
+└── README.md # This file
 ```
 
-**Production ready!** This implementation is secure, efficient, and follows browser best practices. 🎉
+## 🖥 Running Locally
+### 1. Install Dependencies
+```bash
+cd Collaborative-Code-Editor-main
+npm install
+```
+
+### 2. Start WebSocket Server
+```bash
+npm run server
+```
+Server runs on `ws://localhost:8080`
+
+### 3. Start Frontend (New Terminal)
+```bash
+npm run dev
+```
+Frontend runs on `http://localhost:5173`
+
+### 4. Test Collaboration
+1. Open `http://localhost:5173` in Browser 1
+2. Copy the room URL (click "📋 Copy Link")
+3. Open the copied URL in Browser 2
+4. Type in either editor → See changes in both!
+
+## 🔄 Synchronization Flow
+
+```
+User A types "hello"
+↓
+handleEditorChange fires
+↓
+Check: Is this remote? → No
+↓
+Send to WebSocket server
+↓
+Server receives code-change
+↓
+Server updates room.code = "hello"
+↓
+Server broadcasts to all EXCEPT User A
+↓
+User B receives code-update
+↓
+Set isRemoteChange = true
+↓
+Update Monaco editor with "hello"
+↓
+handleEditorChange fires (from Monaco)
+↓
+Check: Is this remote? → Yes
+↓
+Skip WebSocket send (LOOP PREVENTED)
+↓
+Reset isRemoteChange = false
+```
+
+---
+
+
+## 📉 Limitations of Last-Write-Wins
+
+### 1. Concurrent Edits Can Conflict
+
+**Scenario:**
+```
+Time 0: Code = "hello"
+
+User A edits line 1: "hello world" → Send at T1
+User B edits line 2: "hello\ngoodbye" → Send at T2
+
+Server receives A first → Code = "hello world"
+Server receives B second → Code = "hello\ngoodbye"
+
+Result: User A's change is LOST ❌
+```
+
+### 2. No Conflict Resolution
+
+**Problem:**
+- Two users edit same line simultaneously
+- Last message wins
+- No merge, no notification
+- Silent data loss possible
+
+### 3. Character Position Issues
+
+**Problem:**
+```
+User A types at position 5
+User B types at position 5 simultaneously
+
+Both edits apply → Garbled text
+```
+
+### 4. No Operational Transform
+
+**Missing features:**
+- Position adjustments based on other changes
+- Intent preservation
+- Commutative operations
+
+---
+
+## 🧪 Testing
+
+### Test Concurrent Editing
+1. Open two browsers
+2. Both type simultaneously
+3. Observe last-write-wins behavior
+
+### Test Disconnect/Reconnect
+1. Stop server (`Ctrl+C`)
+2. Try editing → Status shows "Disconnected"
+3. Restart server → Auto-reconnects
+
+### Test Room Persistence
+1. User A edits code
+2. User A closes browser
+3. User B joins same room → Sees A's code ✅
+
+---
+
+## 🔧 Configuration
+
+**Change WebSocket URL:**
+```javascript
+// App.jsx
+const WS_URL = 'ws://your-server.com:8080';
+```
+
+**Change Server Port:**
+```javascript
+// server.js
+const PORT = 3001;
+```
+
+**Room ID Strategy:**
+```javascript
+// Auto-generate
+const roomId = 'room-' + Math.random().toString(36).substr(2, 9);
+
+// From URL
+const roomId = new URLSearchParams(location.search).get('room');
+
+// User input
+const roomId = prompt('Enter room name');
+```
+
+---
+## 🐛 Troubleshooting
+
+**WebSocket connection failed:**
+- Ensure server is running (`npm run server`)
+- Check `WS_URL` matches server port
+- Check firewall settings
+
+**Cursor not showing:**
+- Refresh both browsers
+- Ensure Monaco Editor loaded properly
+- Check browser console for errors
+
+**Code execution failing:**
+- **JavaScript:** Check for syntax errors
+- **Python/Java/C++:** Check Piston API is accessible
+- Check network tab for API failures
+
+## 📝 Summary
+
+**What I Built:**
+- ✅ Real-time collaborative editor
+- ✅ WebSocket sync (last-write-wins)
+- ✅ Room-based collaboration
+- ✅ Local code execution
+- ✅ Connection status UI
+
+**What I learned:**
+- How WebSockets enable real-time sync
+- Why execution stays local (security + performance)
+- Last-write-wins limitations
+- How to prevent infinite loops
+- Path to CRDT upgrade
+
+**Next steps:**
+- Add cursor awareness
+- Implement user presence
+- Add chat feature
+- Migrate to Yjs for conflict-free editing
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details
+
+## 🙏 Acknowledgments
+
+- [Monaco Editor](https://microsoft.github.io/monaco-editor/) - VS Code's editor
+- [Piston API](https://github.com/engineer-man/piston) - Code execution engine
+- [ws](https://github.com/websockets/ws) - WebSocket library
+
+## 📧 Contact
+
+Created by Ritvik Ganga  
+
+Project Link: [https://github.com/ritvik-6/Collaborative-Code-Editor](https://github.com/ritvik-6/Collaborative-Code-Editor)
+
+---
