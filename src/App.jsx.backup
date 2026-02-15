@@ -1,0 +1,361 @@
+import { useState, useRef, useEffect } from 'react'
+import Editor from '@monaco-editor/react'
+import './App.css'
+
+// Language configurations with default code snippets
+const LANGUAGES = {
+  javascript: {
+    name: 'JavaScript',
+    defaultCode: `// JavaScript Code
+console.log("Hello, World!");
+
+function fibonacci(n) {
+  if (n <= 1) return n;
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+console.log("Fibonacci(10):", fibonacci(10));
+
+// Test error handling
+// Uncomment to test: throw new Error("Test error");`
+  },
+  python: {
+    name: 'Python',
+    defaultCode: `# Python Code
+print("Hello, World!")
+
+def fibonacci(n):
+    if n <= 1:
+        return n
+    return fibonacci(n - 1) + fibonacci(n - 2)
+
+print("Fibonacci(10):", fibonacci(10))`
+  },
+  java: {
+    name: 'Java',
+    defaultCode: `// Java Code
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+        System.out.println("Fibonacci(10): " + fibonacci(10));
+    }
+    
+    public static int fibonacci(int n) {
+        if (n <= 1) return n;
+        return fibonacci(n - 1) + fibonacci(n - 2);
+    }
+}`
+  },
+  cpp: {
+    name: 'C++',
+    defaultCode: `// C++ Code
+#include <iostream>
+using namespace std;
+
+int fibonacci(int n) {
+    if (n <= 1) return n;
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+int main() {
+    cout << "Hello, World!" << endl;
+    cout << "Fibonacci(10): " << fibonacci(10) << endl;
+    return 0;
+}`
+  },
+  html: {
+    name: 'HTML',
+    defaultCode: `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hello World</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        h1 { color: #333; }
+    </style>
+</head>
+<body>
+    <h1>Hello, World!</h1>
+    <p>Welcome to HTML editing!</p>
+</body>
+</html>`
+  }
+}
+
+// Generate iframe srcDoc template
+const generateIframeSrcDoc = (userCode) => {
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+</head>
+<body>
+  <script>
+    // Override console methods to send messages to parent
+    (function() {
+      const originalLog = console.log;
+      const originalError = console.error;
+      const originalWarn = console.warn;
+      
+      console.log = function(...args) {
+        // Send log to parent via postMessage
+        window.parent.postMessage({
+          type: 'console.log',
+          data: args.map(arg => {
+            try {
+              // Handle objects, arrays, etc.
+              return typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg);
+            } catch (e) {
+              return String(arg);
+            }
+          })
+        }, '*');
+        
+        // Keep original console behavior (visible in iframe's console)
+        originalLog.apply(console, args);
+      };
+      
+      console.error = function(...args) {
+        window.parent.postMessage({
+          type: 'console.error',
+          data: args.map(arg => String(arg))
+        }, '*');
+        originalError.apply(console, args);
+      };
+      
+      console.warn = function(...args) {
+        window.parent.postMessage({
+          type: 'console.warn',
+          data: args.map(arg => String(arg))
+        }, '*');
+        originalWarn.apply(console, args);
+      };
+      
+      // Catch runtime errors
+      window.onerror = function(message, source, lineno, colno, error) {
+        window.parent.postMessage({
+          type: 'runtime.error',
+          data: [error ? error.toString() : message]
+        }, '*');
+        return false; // Allow default error handling
+      };
+      
+      // Catch unhandled promise rejections
+      window.addEventListener('unhandledrejection', function(event) {
+        window.parent.postMessage({
+          type: 'runtime.error',
+          data: ['Unhandled Promise Rejection: ' + event.reason]
+        }, '*');
+      });
+    })();
+  </script>
+  
+  <script>
+    // User code executes here
+    try {
+      ${userCode}
+    } catch (error) {
+      console.error('Execution Error: ' + error.message);
+    }
+  </script>
+</body>
+</html>
+  `.trim();
+};
+
+function App() {
+  // State management
+  const [language, setLanguage] = useState('javascript')
+  const [code, setCode] = useState(LANGUAGES.javascript.defaultCode)
+  const [output, setOutput] = useState([])
+  const [isRunning, setIsRunning] = useState(false)
+  
+  // Ref for the sandboxed iframe
+  const iframeRef = useRef(null)
+  
+  // Setup postMessage listener
+  useEffect(() => {
+    const handleMessage = (event) => {
+      // Security: In production, validate event.origin
+      // For this demo, we accept all origins since iframe is sandboxed
+      
+      const { type, data } = event.data;
+      
+      if (type === 'console.log') {
+        setOutput(prev => [...prev, {
+          type: 'log',
+          content: data.join(' ')
+        }]);
+      } else if (type === 'console.error') {
+        setOutput(prev => [...prev, {
+          type: 'error',
+          content: data.join(' ')
+        }]);
+      } else if (type === 'console.warn') {
+        setOutput(prev => [...prev, {
+          type: 'warn',
+          content: data.join(' ')
+        }]);
+      } else if (type === 'runtime.error') {
+        setOutput(prev => [...prev, {
+          type: 'error',
+          content: '❌ Runtime Error: ' + data.join(' ')
+        }]);
+      }
+    };
+    
+    window.addEventListener('message', handleMessage);
+    
+    // Cleanup
+    return () => {
+      window.removeEventListener('message', handleMessage);
+    };
+  }, []);
+  
+  // Handler called whenever editor content changes
+  const handleEditorChange = (value) => {
+    setCode(value)
+  }
+  
+  // Handler for language change
+  const handleLanguageChange = (e) => {
+    const newLanguage = e.target.value
+    setLanguage(newLanguage)
+    setCode(LANGUAGES[newLanguage].defaultCode)
+    setOutput([])
+  }
+  
+  // Execute JavaScript code in sandboxed iframe using postMessage
+  const runCode = () => {
+    if (language !== 'javascript') {
+      setOutput([{
+        type: 'error',
+        content: `Cannot execute ${LANGUAGES[language].name} in browser. Only JavaScript is supported.`
+      }]);
+      return
+    }
+    
+    setIsRunning(true)
+    setOutput([]) // Clear previous output
+    
+    // Generate iframe content with user code
+    const iframeSrcDoc = generateIframeSrcDoc(code);
+    
+    // Update iframe (this will execute the code)
+    if (iframeRef.current) {
+      iframeRef.current.srcdoc = iframeSrcDoc;
+    }
+    
+    // Reset running state after a short delay
+    setTimeout(() => setIsRunning(false), 100);
+  }
+
+  return (
+    <div className="app">
+      {/* Header */}
+      <header className="header">
+        <h1>Code Editor - Secure Execution</h1>
+        <p>Sandboxed iframe + postMessage communication</p>
+      </header>
+
+      {/* Main container */}
+      <div className="container">
+        {/* Monaco Editor */}
+        <div className="editor-section">
+          <div className="editor-header">
+            <h2>Editor</h2>
+            <div className="controls">
+              <select 
+                value={language} 
+                onChange={handleLanguageChange}
+                className="language-selector"
+              >
+                {Object.entries(LANGUAGES).map(([key, lang]) => (
+                  <option key={key} value={key}>
+                    {lang.name}
+                  </option>
+                ))}
+              </select>
+              
+              <button 
+                onClick={runCode}
+                disabled={isRunning || language !== 'javascript'}
+                className="run-button"
+                title={language !== 'javascript' ? 'Only JavaScript can be executed in browser' : 'Run JavaScript code'}
+              >
+                {isRunning ? '⏳ Running...' : '▶ Run Code'}
+              </button>
+            </div>
+          </div>
+          
+          <Editor
+            height="500px"
+            language={language}
+            value={code}
+            onChange={handleEditorChange}
+            theme="vs-dark"
+            options={{
+              fontSize: 14,
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              automaticLayout: true,
+            }}
+          />
+        </div>
+
+        {/* Right sidebar with state and output */}
+        <div className="sidebar">
+          {/* Display current state */}
+          <div className="state-section">
+            <h2>Editor State</h2>
+            <div className="state-display">
+              <p><strong>Language:</strong> {LANGUAGES[language].name}</p>
+              <p><strong>Characters:</strong> {code.length}</p>
+              <p><strong>Lines:</strong> {code.split('\n').length}</p>
+              <p><strong>Executable:</strong> {language === 'javascript' ? '✅ Yes' : '❌ No'}</p>
+              <p><strong>Security:</strong> Sandboxed iframe</p>
+            </div>
+          </div>
+          
+          {/* Output section */}
+          <div className="output-section">
+            <h2>Console Output</h2>
+            {output.length > 0 ? (
+              <div className="console-output">
+                {output.map((item, index) => (
+                  <div 
+                    key={index} 
+                    className={`log-line ${item.type === 'error' ? 'log-error' : item.type === 'warn' ? 'log-warn' : ''}`}
+                  >
+                    <span className="log-arrow">{'>'}</span>
+                    <span className="log-content">{item.content}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-output">
+                {language === 'javascript' 
+                  ? '💡 Click "Run Code" to execute and see output here'
+                  : `⚠️ ${LANGUAGES[language].name} cannot be executed in browser. Syntax highlighting only.`
+                }
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      
+      {/* Hidden sandboxed iframe - NO allow-same-origin */}
+      <iframe
+        ref={iframeRef}
+        sandbox="allow-scripts"
+        style={{ display: 'none' }}
+        title="code-executor"
+      />
+    </div>
+  )
+}
+
+export default App
