@@ -22,6 +22,17 @@ A real-time collaborative code editor built with React, Monaco Editor, and WebSo
 - **No Backend Data Storage** - In-memory room management
 - **WebSocket Communication** - Encrypted real-time sync
 
+## 📷 Screenshots
+
+<img width="1897" height="886" alt="image" src="https://github.com/user-attachments/assets/b27fa1a0-f7a1-4716-9c81-29ebf998574c" />
+
+<img width="1897" height="879" alt="image" src="https://github.com/user-attachments/assets/8823a837-9ad4-4e17-aa66-2e920c2e5fbe" />
+
+<img width="1897" height="882" alt="image" src="https://github.com/user-attachments/assets/333dd85d-b85f-47f4-b695-85351772b621" />
+
+
+
+
 ## 🏗️ Architecture
 
 ### Backend (WebSocket Server)
